@@ -1,26 +1,143 @@
-# docker-load-balancing-architecture
+# Exécution de WordPress hautement disponible avec MySQL sur Kubernetes
 
-[![Build Status](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes.svg?branch=master)](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes)
-![IBM Cloud Deployments](https://metrics-tracker.mybluemix.net/stats/8201eec1bc017860952416f1cc5666ce/badge.svg)
+[![Apache]
+![MySql]
 
 
 # Scalable WordPress deployment on Kubernetes Cluster
 
-This journey showcases the full power of Kubernetes clusters and shows how can we deploy the world's most popular website framework on top of world's most popular container orchestration platform. We provide a full roadmap for hosting WordPress on a Kubernetes Cluster. Each component runs in a separate container or group of containers.
+WordPress est une plate-forme populaire pour l'édition et la publication de contenu pour le web. Dans ce tutoriel, je vais vous montrer comment construire un déploiement WordPress hautement disponible (HA) en utilisant Kubernetes.
 
-WordPress represents a typical multi-tier app and each component will have its own container(s). The WordPress containers will be the frontend tier and the MySQL container will be the database/backend tier for WordPress.
+WordPress se compose de deux composants principaux: le serveur PHP WordPress et une base de données pour stocker les informations utilisateur, les publications et les données du site. Nous devons faire en sorte que ces deux HA soient tolérants aux pannes pour toute l'application.
 
-In addition to deployment on Kubernetes, we will also show how you can scale the front WordPress tier, as well as how you can use MySQL as a service from IBM Cloud to be used by WordPress frontend.
+L'exécution de services HA peut être difficile lorsque le matériel et les adresses changent; rester debout est difficile. Avec Kubernetes et ses puissants composants réseau, nous pouvons déployer un site HA WordPress et une base de données MySQL sans taper une seule adresse IP (presque).
 
-![kube-wordpress](images/kube-wordpress-code.png)
+Dans ce tutoriel, je vais vous montrer comment créer des classes de stockage, des services, des cartes de configuration et des ensembles dans Kubernetes; exécuter HA MySQL; et raccordez un cluster HA WordPress au service de base de données. Si vous n'avez pas encore de cluster Kubernetes, vous pouvez facilement en créer un sur Amazon, Google ou Azure, ou en utilisant  Rancher Kubernetes Engine (RKE)  sur n'importe quel serveur.
 
-## Included Components
+## Aperçu de l'architecture
+
+Je vais maintenant vous présenter un aperçu des technologies que nous allons utiliser et de leurs fonctions:
+
+Stockage pour les fichiers d'application WordPress: NFS avec un support de disque persistant GCE
+Cluster de base de données: MySQL avec xtrabackup pour la parité
+Niveau de l'application: une image WordPress DockerHub montée sur le stockage NFS
+Équilibrage de charge et mise en réseau: équilibreurs de charge basés sur Kubernetes et mise en réseau de service
+L'architecture est organisée comme indiqué ci-dessous:
+
 - [WordPress (Latest)](https://hub.docker.com/_/wordpress/)
 - [MySQL (5.6)](https://hub.docker.com/_/mysql/)
 - [Kubernetes Clusters](https://console.ng.bluemix.net/docs/containers/cs_ov.html#cs_ov)
-- [IBM Cloud Compose for MySQL](https://console.ng.bluemix.net/catalog/services/compose-for-mysql)
-- [IBM Cloud DevOps Toolchain Service](https://console.ng.bluemix.net/catalog/services/continuous-delivery)
-- [IBM Cloud Container Service](https://console.ng.bluemix.net/catalog/?taxonomyNavigation=apps&category=containers)
+
+Diagramme
+
+![kube-wordpress](https://i.imgur.com/Urk4o79.png)
+
+## Création de classes de stockage, de services et de cartes de configuration dans Kubernetes
+
+
+Dans Kubernetes, les ensembles avec état offrent un moyen de définir l'ordre d'initialisation du module. Nous utiliserons un ensemble avec état pour MySQL, car il garantit que nos nœuds de données ont suffisamment de temps pour répliquer les enregistrements des pods précédents lors de la rotation. La façon dont nous configurons cet ensemble d'états permettra au maître MySQL de tourner avant n'importe lequel des esclaves, de sorte que le clonage peut se produire directement de maître à esclave quand nous passons à l'échelle supérieure.
+
+Pour commencer, nous devons créer une classe de stockage de volume persistante et une carte de configuration pour appliquer les configurations maître et esclave selon les besoins.
+
+Nous utilisons des volumes persistants pour que les données de nos bases de données ne soient pas liées à des modules spécifiques du cluster. Cette méthode protège la base de données contre la perte de données en cas de perte du module maître MySQL. Lorsqu'un module maître est perdu, il peut se reconnecter aux xtrabackupesclaves sur les noeuds esclaves et répliquer les données de l'esclave vers le maître. La réplication MySQL gère la réplication maître à esclave mais xtrabackupgère la réplication descendante esclave à maître.
+
+Pour allouer dynamiquement des volumes persistants, nous créons la classe de stockage suivante à l'aide de disques persistants GCE. Cependant, Kubernetes offre une variété de fournisseurs de stockage de volume persistant:
+
+
+```
+# storage-class.yaml
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: slow
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-standard
+  zone: us-central1-a
+```
+
+Créez la classe et déployer avec cette commande:  $ kubectl create -f storage-class.yaml.
+
+Ensuite, nous allons créer la configuration, qui spécifie quelques variables à définir dans les fichiers de configuration MySQL. Ces différentes configurations sont sélectionnées par les pods elles-mêmes, mais elles nous offrent un moyen pratique de gérer les variables de configuration potentielles.
+
+Créez un fichier YAML nommé mysql-configmap.yamlpour gérer cette configuration comme suit:
+
+```
+# mysql-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+data:
+  master.cnf: |
+    # Apply this config only on the master.
+    [mysqld]
+    log-bin
+    skip-host-cache
+    skip-name-resolve
+  slave.cnf: |
+    # Apply this config only on slaves.
+    [mysqld]
+    skip-host-cache
+    skip-name-resolve
+```
+
+Créer et déployer le ConfigMap avec cette commande:  $ kubectl create -f mysql-configmap.yaml.
+
+Ensuite, nous voulons configurer le service de sorte que les pods MySQL puissent se parler entre eux et que nos pods WordPress puissent parler à MySQL en utilisant  mysql-services.yaml. Cela permet également un équilibreur de charge de service pour le service MySQL.
+
+```
+# mysql-services.yaml
+# Headless service for stable DNS entries of StatefulSet members.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+spec:
+  ports:
+  - name: mysql
+    port: 3306
+  clusterIP: None
+  selector:
+    app: mysql
+  ```
+  
+Avec cette déclaration de service, nous jetons les bases d'un cluster d'écriture multiple et de plusieurs lectures d'instances MySQL. Cette configuration est nécessaire car chaque instance de WordPress peut potentiellement écrire dans la base de données, de sorte que chaque nœud doit être prêt à lire et à écrire.
+
+Pour créer les services ci-dessus, exécutez la commande suivante:
+
+```$ kubectl create -f mysql-services.yaml|```
+
+À ce stade, nous avons créé la classe de stockage de revendications de volume qui va remettre des disques persistants à tous les pods qui les demandent, nous avons configuré la configuration qui définit quelques variables dans les fichiers de configuration MySQL, et nous avons configuré un réseau ... service de niveau qui va charger les demandes d'équilibrage aux serveurs MySQL. Tout ceci est juste un cadre pour les ensembles avec état, où les serveurs MySQL fonctionnent réellement, que nous explorerons ensuite.
+
+##Configuration de MySQL avec des ensembles avec état
+
+Dans cette section, nous allons écrire la configuration YAML pour une instance MySQL en utilisant un ensemble avec état.
+
+Définissons notre ensemble dynamique:
+
+1. [Créez trois pods et enregistrez-les dans le service MySQL.]
+2. [Définissez le modèle suivant pour chaque pod:]
+3. [Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  init-mysql.]
+  . [Utilisez l'  mysql:5.7 image pour ce conteneur.]
+  . [Exécutez un script bash à configurer xtrabackup.]
+  . [Montez deux nouveaux volumes pour la configuration et la configuration.]
+
+4. [Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  clone-mysql.]
+  . [Utilisez l'image de Google Cloud Registry  xtrabackup:1.0 pour ce conteneur.]
+  . [Exécutez un script bash pour cloner l'existant xtrabackupsdu pair précédent.]
+  . [Montez deux nouveaux volumes pour les données et la configuration.]
+  . [Ce conteneur héberge efficacement les données clonées afin que les nouveaux conteneurs esclaves puissent les récupérer.]
+5. [Créez les conteneurs principaux pour les serveurs MySQL esclaves.]
+  . [Créez un conteneur esclave MySQL et configurez-le pour vous connecter au maître MySQL.]
+  . [Créez un xtrabackupconteneur esclave et configurez-le pour vous connecter au maître xtrabackup.]
+6. [Créez un modèle de revendication de volume pour décrire chaque volume à créer en tant que disque persistant de 10 Go.]
+
+La configuration suivante définit le comportement des maîtres et des esclaves de notre cluster MySQL, offrant une configuration bash qui exécute le client esclave et assure le bon fonctionnement d'un maître avant le clonage. Les esclaves et les maîtres ont chacun leur propre volume de 10 Go qu'ils demandent à partir de la classe de stockage de volume persistante que nous avons définie précédemment.
 
 ## Prerequisite
 
