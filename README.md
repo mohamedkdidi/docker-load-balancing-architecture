@@ -29,7 +29,7 @@ L'architecture est organisée comme indiqué ci-dessous:
 
 Diagramme
 
-![kube-wordpress](https://i.imgur.com/Urk4o79.png)
+![kube-wordpress](https://comtechies.com/wp-content/uploads/2016/04/kubernetes-cluster.png)
 
 ## Création de classes de stockage, de services et de cartes de configuration dans Kubernetes
 
