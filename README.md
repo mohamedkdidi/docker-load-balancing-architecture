@@ -2,9 +2,6 @@
 
 [![Build Status](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes.svg?branch=master)](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes)
 
-
-# Scalable WordPress deployment en Kubernetes Cluster
-
 WordPress est une plate-forme populaire pour l'édition et la publication de contenu pour le web. Dans ce tutoriel, je vais vous montrer comment construire un déploiement WordPress hautement disponible (HA) en utilisant Kubernetes.
 
 WordPress se compose de deux composants principaux: le serveur PHP WordPress et une base de données pour stocker les informations utilisateur, les publications et les données du site. Nous devons faire en sorte que ces deux HA soient tolérants aux pannes pour toute l'application.
