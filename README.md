@@ -1,10 +1,9 @@
 # Exécution de WordPress hautement disponible avec MySQL sur Kubernetes
 
-[![Apache]
-![MySql]
+[![Build Status](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes.svg?branch=master)](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes)
 
 
-# Scalable WordPress deployment on Kubernetes Cluster
+# Scalable WordPress deployment en Kubernetes Cluster
 
 WordPress est une plate-forme populaire pour l'édition et la publication de contenu pour le web. Dans ce tutoriel, je vais vous montrer comment construire un déploiement WordPress hautement disponible (HA) en utilisant Kubernetes.
 
@@ -112,278 +111,368 @@ Pour créer les services ci-dessus, exécutez la commande suivante:
 
 ```$ kubectl create -f mysql-services.yaml|```
 
-À ce stade, nous avons créé la classe de stockage de revendications de volume qui va remettre des disques persistants à tous les pods qui les demandent, nous avons configuré la configuration qui définit quelques variables dans les fichiers de configuration MySQL, et nous avons configuré un réseau ... service de niveau qui va charger les demandes d'équilibrage aux serveurs MySQL. Tout ceci est juste un cadre pour les ensembles avec état, où les serveurs MySQL fonctionnent réellement, que nous explorerons ensuite.
+Nous avons créé la classe de stockage de revendications de volume qui va remettre des disques persistants à tous les pods qui les demandent, nous avons configuré la configuration qui définit quelques variables dans les fichiers de configuration MySQL, et nous avons configuré un réseau ... service de niveau qui va charger les demandes d'équilibrage aux serveurs MySQL. Tout ceci est juste un cadre pour les ensembles avec état, où les serveurs MySQL fonctionnent réellement, que nous explorerons ensuite.
 
-##Configuration de MySQL avec des ensembles avec état
+## Configuration de MySQL avec des ensembles avec état
 
 Dans cette section, nous allons écrire la configuration YAML pour une instance MySQL en utilisant un ensemble avec état.
 
 Définissons notre ensemble dynamique:
 
-1. [Créez trois pods et enregistrez-les dans le service MySQL.]
-2. [Définissez le modèle suivant pour chaque pod:]
-3. [Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  init-mysql.]
-  . [Utilisez l'  mysql:5.7 image pour ce conteneur.]
-  . [Exécutez un script bash à configurer xtrabackup.]
-  . [Montez deux nouveaux volumes pour la configuration et la configuration.]
+1. Créez trois pods et enregistrez-les dans le service MySQL.
+2. Définissez le modèle suivant pour chaque pod:
+3. Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  init-mysql.
+  . Utilisez l'  mysql:5.7 image pour ce conteneur.
+  . Exécutez un script bash à configurer xtrabackup.
+  . Montez deux nouveaux volumes pour la configuration et la configuration.
 
-4. [Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  clone-mysql.]
-  . [Utilisez l'image de Google Cloud Registry  xtrabackup:1.0 pour ce conteneur.]
-  . [Exécutez un script bash pour cloner l'existant xtrabackupsdu pair précédent.]
-  . [Montez deux nouveaux volumes pour les données et la configuration.]
-  . [Ce conteneur héberge efficacement les données clonées afin que les nouveaux conteneurs esclaves puissent les récupérer.]
-5. [Créez les conteneurs principaux pour les serveurs MySQL esclaves.]
-  . [Créez un conteneur esclave MySQL et configurez-le pour vous connecter au maître MySQL.]
-  . [Créez un xtrabackupconteneur esclave et configurez-le pour vous connecter au maître xtrabackup.]
-6. [Créez un modèle de revendication de volume pour décrire chaque volume à créer en tant que disque persistant de 10 Go.]
+4. Créez un conteneur d'initialisation pour le serveur MySQL maître nommé  clone-mysql.
+  . Utilisez l'image de Google Cloud Registry  xtrabackup:1.0 pour ce conteneur.
+  . Exécutez un script bash pour cloner l'existant xtrabackupsdu pair précédent.
+  . Montez deux nouveaux volumes pour les données et la configuration.
+  . Ce conteneur héberge efficacement les données clonées afin que les nouveaux conteneurs esclaves puissent les récupérer.
+5. Créez les conteneurs principaux pour les serveurs MySQL esclaves.
+  . Créez un conteneur esclave MySQL et configurez-le pour vous connecter au maître MySQL.
+  . Créez un xtrabackupconteneur esclave et configurez-le pour vous connecter au maître xtrabackup.
+6. Créez un modèle de revendication de volume pour décrire chaque volume à créer en tant que disque persistant de 10 Go.
 
 La configuration suivante définit le comportement des maîtres et des esclaves de notre cluster MySQL, offrant une configuration bash qui exécute le client esclave et assure le bon fonctionnement d'un maître avant le clonage. Les esclaves et les maîtres ont chacun leur propre volume de 10 Go qu'ils demandent à partir de la classe de stockage de volume persistante que nous avons définie précédemment.
 
-## Prerequisite
+```
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  serviceName: mysql
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+      - name: init-mysql
+        image: mysql:5.7
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          # Generate mysql server-id from pod ordinal index.
+          [[ `hostname` =~ -([0-9]+)$ ]] || exit 1
+          ordinal=${BASH_REMATCH[1]}
+          echo [mysqld] > /mnt/conf.d/server-id.cnf
+          # Add an offset to avoid reserved server-id=0 value.
+          echo server-id=$((100 + $ordinal)) >> /mnt/conf.d/server-id.cnf
+          # Copy appropriate conf.d files from config-map to emptyDir.
+          if [[ $ordinal -eq 0 ]]; then
+            cp /mnt/config-map/master.cnf /mnt/conf.d/
+          else
+            cp /mnt/config-map/slave.cnf /mnt/conf.d/
+          fi
+        volumeMounts:
+        - name: conf
+          mountPath: /mnt/conf.d
+        - name: config-map
+          mountPath: /mnt/config-map
+      - name: clone-mysql
+        image: gcr.io/google-samples/xtrabackup:1.0
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          # Skip the clone if data already exists.
+          [[ -d /var/lib/mysql/mysql ]] && exit 0
+          # Skip the clone on master (ordinal index 0).
+          [[ `hostname` =~ -([0-9]+)$ ]] || exit 1
+          ordinal=${BASH_REMATCH[1]}
+          [[ $ordinal -eq 0 ]] && exit 0
+          # Clone data from previous peer.
+          ncat --recv-only mysql-$(($ordinal-1)).mysql 3307 | xbstream -x -C /var/lib/mysql
+          # Prepare the backup.
+          xtrabackup --prepare --target-dir=/var/lib/mysql
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+      containers:
+      - name: mysql
+        image: mysql:5.7
+        env:
+        - name: MYSQL_ALLOW_EMPTY_PASSWORD
+          value: "1"
+        ports:
+        - name: mysql
+          containerPort: 3306
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            # Check we can execute queries over TCP (skip-networking is off).
+            command: ["mysql", "-h", "127.0.0.1", "-e", "SELECT 1"]
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          timeoutSeconds: 1
+      - name: xtrabackup
+        image: gcr.io/google-samples/xtrabackup:1.0
+        ports:
+        - name: xtrabackup
+          containerPort: 3307
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          cd /var/lib/mysql
 
-Create a Kubernetes cluster with either [Minikube](https://kubernetes.io/docs/getting-started-guides/minikube) for local testing, with [IBM IBM Cloud Container Service](https://github.com/IBM/container-journey-template), or [IBM Cloud Private](https://github.com/IBM/deploy-ibm-cloud-private/blob/master/README.md) to deploy in cloud. The code here is regularly tested against [Kubernetes Cluster from IBM Cloud Container Service](https://console.ng.bluemix.net/docs/containers/cs_ov.html#cs_ov) using Travis.
+          # Determine binlog position of cloned data, if any.
+          if [[ -f xtrabackup_slave_info ]]; then
+            # XtraBackup already generated a partial "CHANGE MASTER TO" query
+            # because we're cloning from an existing slave.
+            mv xtrabackup_slave_info change_master_to.sql.in
+            # Ignore xtrabackup_binlog_info in this case (it's useless).
+            rm -f xtrabackup_binlog_info
+          elif [[ -f xtrabackup_binlog_info ]]; then
+            # We're cloning directly from master. Parse binlog position.
+            [[ `cat xtrabackup_binlog_info` =~ ^(.*?)[[:space:]]+(.*?)$ ]] || exit 1
+            rm xtrabackup_binlog_info
+            echo "CHANGE MASTER TO MASTER_LOG_FILE='${BASH_REMATCH[1]}',\
+                  MASTER_LOG_POS=${BASH_REMATCH[2]}" > change_master_to.sql.in
+          fi
 
-## Objectives
+          # Check if we need to complete a clone by starting replication.
+          if [[ -f change_master_to.sql.in ]]; then
+            echo "Waiting for mysqld to be ready (accepting connections)"
+            until mysql -h 127.0.0.1 -e "SELECT 1"; do sleep 1; done
 
-This scenario provides instructions for the following tasks:
+            echo "Initializing replication from clone position"
+            # In case of container restart, attempt this at-most-once.
+            mv change_master_to.sql.in change_master_to.sql.orig
+            mysql -h 127.0.0.1 <<EOF
+          $(<change_master_to.sql.orig),
+            MASTER_HOST='mysql-0.mysql',
+            MASTER_USER='root',
+            MASTER_PASSWORD='',
+            MASTER_CONNECT_RETRY=10;
+          START SLAVE;
+          EOF
+          fi
 
-- Create local persistent volumes to define persistent disks.
-- Create a secret to protect sensitive data.
-- Create and deploy the WordPress frontend with one or more pods.
-- Create and deploy the MySQL database(either in a container or using IBM Cloud MySQL as backend).
-
-## Deploy to IBM Cloud
-If you want to deploy the WordPress directly to IBM Cloud, click on 'Deploy to IBM Cloud' button below to create an IBM Cloud DevOps service toolchain and pipeline for deploying the WordPress sample, else jump to [Steps](##steps)
-
-[![Create Toolchain](https://metrics-tracker.mybluemix.net/stats/8201eec1bc017860952416f1cc5666ce/button.svg)](https://console.ng.bluemix.net/devops/setup/deploy/)
-
-Please follow the [Toolchain instructions](https://github.com/IBM/container-journey-template/blob/master/Toolchain_Instructions_new.md) to complete your toolchain and pipeline.
-
-## Steps
-1. [Setup MySQL Secrets](#1-setup-mysql-secrets)
-2. [Create local persistent volumes](#2-create-local-persistent-volumes)
-3. [Create Services and Deployments for WordPress and MySQL](#3-create-services-and-deployments-for-wordpress-and-mysql)
-  - 3.1 [Using MySQL in container](#31-using-mysql-in-container)
-  - 3.2 [Using Bluemix MySQL](#32-using-bluemix-mysql-as-backend)
-4. [Accessing the external WordPress link](#4-accessing-the-external-wordpress-link)
-5. [Using WordPress](#5-using-wordpress)
-
-# 1. Setup MySQL Secrets
-
-> *Quickstart option:* In this repository, run `bash scripts/quickstart.sh`.
-
-Create a new file called `password.txt` in the same directory and put your desired MySQL password inside `password.txt` (Could be any string with ASCII characters).
-
-
-We need to make sure `password.txt` does not have any trailing newline. Use the following command to remove possible newlines.
-
-```bash
-tr -d '\n' <password.txt >.strippedpassword.txt && mv .strippedpassword.txt password.txt
+          # Start a server to send backups when requested by peers.
+          exec ncat --listen --keep-open --send-only --max-conns=1 3307 -c \
+            "xtrabackup --backup --slave-info --stream=xbstream --host=127.0.0.1 --user=root"
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      volumes:
+      - name: conf
+        emptyDir: {}
+      - name: config-map
+        configMap:
+          name: mysql
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
 ```
 
-# 2. Create Local Persistent Volumes
-To save your data beyond the lifecycle of a Kubernetes pod, you will want to create persistent volumes for your MySQL and Wordpress applications to attach to.
+Enregistrer ce fichier sous  mysql-statefulset.yaml. Tapez  kubectl create -f mysql-statefulset.yaml et laissez Kubernetes déployer votre base de données.
 
-#### For "lite" IBM Bluemix Container Service
-Create the local persistent volumes manually by running
-```bash
-kubectl create -f local-volumes.yaml
+Maintenant, quand vous appelez  $ kubectl get pods, vous devriez voir trois pods en train de tourner ou prêts à recevoir deux conteneurs.
+
+Le pod principal est noté  mysql-0 et les esclaves suivent  mysql-1 et  mysql-2.
+
+Donnez quelques minutes aux pods pour vous assurer que le  xtrabackup service est correctement synchronisé entre les pods, puis passez au déploiement WordPress.
+
+Vous pouvez vérifier les journaux des conteneurs individuels pour confirmer qu'aucun message d'erreur n'est lancé. Pour ce faire, exécutez $ kubectl logs -f -c <container_name>
+
+Le xtrabackupconteneur principal doit afficher les deux connexions des esclaves et aucune erreur ne doit être visible dans les journaux.
+
+# Déployer WordPress hautement disponible
+
+La dernière étape de cette procédure consiste à déployer nos modules WordPress sur le cluster. Pour ce faire, nous voulons définir un service pour WordPress et un déploiement.
+
+Pour que WordPress soit HA, nous voulons que chaque conteneur qui exécute le serveur soit entièrement remplaçable, ce qui signifie que nous pouvons en terminer un et en créer un autre sans modifier la disponibilité des données ou des services. Nous voulons également tolérer au moins un conteneur ayant échoué, ayant un conteneur redondant là pour prendre le relais.
+
+WordPress stocke les données importantes du site dans le répertoire de l'application  /var/www/html. Pour deux instances de WordPress pour servir le même site, ce dossier doit contenir des données identiques.
+
+Lors de l'exécution de WordPress dans HA, nous devons partager les  /var/www/html dossiers entre les instances, nous allons donc définir un service NFS qui sera le point de montage pour ces volumes.
+
+La configuration suivante configure les services NFS. J'ai fourni la version anglaise ordinaire ci-dessous:
+
+> Définissez un contrôleur de réplication pour le serveur NFS qui garantira l'exécution d'au moins une instance du serveur NFS à tout moment.
+Définissez une revendication de volume persistante pour créer notre disque NFS partagé en tant que disque persistant GCE de 200 Go.
+> Définissez un contrôleur de réplication pour le serveur NFS qui garantira l'exécution d'au moins une instance du serveur NFS à tout moment.
+> Ouvrez les ports 2049, 20048 et 111 dans le conteneur pour rendre le partage NFS accessible.
+> Utilisez l' volume-nfs:0.8 image du registre Google Cloud  pour le serveur NFS.
+> Définissez un service pour le serveur NFS pour gérer le routage d'adresse IP.
+> Autoriser les ports nécessaires à travers ce pare-feu de service.
+
+
+Déployer le serveur NFS en utilisant  $ kubectl create -f nfs.yaml.
+
+Maintenant, nous devons courir  $ kubectl describe services nfs-server pour gagner l'adresse IP à utiliser ci-dessous.
+
+Remarque: À l'avenir, nous serons en mesure de relier ces deux éléments en utilisant les noms de service, mais pour l'instant, vous devez coder en dur l'adresse IP.
+
 ```
-#### For paid IBM Bluemix Container Service OR Minikube
-Persistent volumes are created dynamically for you when the MySQL and Wordpress applications are deployed. No action is needed.
+# wordpress.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: wordpress
+    tier: frontend
+  type: LoadBalancer
 
-# 3. Create Services and deployments for WordPress and MySQL
+---
 
-### 3.1 Using MySQL in container
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs
+spec:
+  capacity:
+    storage: 20G
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    # FIXME: use the right IP
+    server: <IP of the NFS Service>
+    path: "/"
 
-> *Note:* If you want to use Bluemix Compose-MySql as your backend, please go to [Using Bluemix MySQL as backend](#32-using-bluemix-mysql-as-backend).
+---
 
-Install persistent volume on your cluster's local storage. Then, create the secret and services for MySQL and WordPress.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 20G
 
-```bash
-kubectl create secret generic mysql-pass --from-file=password.txt
-kubectl create -f mysql-deployment.yaml
-kubectl create -f wordpress-deployment.yaml
-```
+---
 
-
-When all your pods are running, run the following commands to check your pod names.
-
-```bash
-kubectl get pods
-```
-
-This should return a list of pods from the kubernetes cluster.
-
-```bash
-NAME                               READY     STATUS    RESTARTS   AGE
-wordpress-3772071710-58mmd         1/1       Running   0          17s
-wordpress-mysql-2569670970-bd07b   1/1       Running   0          1m
-```
-
-Now please move on to [Accessing the External Link](#4-accessing-the-external-wordpress-link).
-
-### 3.2 Using Bluemix MySQL as backend
-
-Provision Compose for MySQL in Bluemix via https://console.ng.bluemix.net/catalog/services/compose-for-mysql
-
-Go to Service credentials and view your credentials. Your MySQL hostname, port, user, and password are under your credential uri and it should look like this
-
-![mysql](images/mysql.png)
-
-Modify your `wordpress-deployment.yaml` file, change WORDPRESS_DB_HOST's value to your MySQL hostname and port(i.e. `value: <hostname>:<port>`), WORDPRESS_DB_USER's value to your MySQL user, and WORDPRESS_DB_PASSWORD's value to your MySQL password.
-
-And the environment variables should look like this
-
-```yaml
+apiVersion: apps/v1beta1 # for versions before 1.8.0 use apps/v1beta1
+kind: Deployment
+metadata:
+  name: wordpress
+  labels:
+    app: wordpress
+spec:
+  selector:
+    matchLabels:
+      app: wordpress
+      tier: frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wordpress
+        tier: frontend
     spec:
       containers:
-      - image: wordpress:4.7.3-apache
+      - image: wordpress:4.9-apache
         name: wordpress
         env:
         - name: WORDPRESS_DB_HOST
-          value: sl-us-dal-9-portal.7.dblayer.com:22412
-        - name: WORDPRESS_DB_USER
-          value: admin
+          value: mysql
         - name: WORDPRESS_DB_PASSWORD
-          value: XMRXTOXTDWOOPXEE
+          value: ""
+        ports:
+        - containerPort: 80
+          name: wordpress
+        volumeMounts:
+        - name: wordpress-persistent-storage
+          mountPath: /var/www/html
+      volumes:
+      - name: wordpress-persistent-storage
+        persistentVolumeClaim:
+            claimName: nfs
+            
 ```
+Nous avons maintenant créé une revendication de volume persistante qui correspond au service NFS que nous avons créé précédemment. Il attache ensuite le volume au pod WordPress à la  /var/www/html racine, où WordPress est installé. Cela préserve toutes les installations et tous les environnements dans les modules WordPress du cluster. Avec cette configuration, nous pouvons lancer et démonter n'importe quel nœud WordPress et les données resteront. Étant donné que le service NFS utilise constamment le volume physique, il conserve le volume et ne le recycle pas ou ne le répartit pas correctement.
 
-After you modified the `wordpress-deployment.yaml`, run the following commands to deploy WordPress.
+Déployez les instances WordPress en utilisant  $ kubectl create -f wordpress.yaml.
 
-```bash
-kubectl create -f wordpress-deployment.yaml
-```
+Le déploiement par défaut n'exécute qu'une seule instance de WordPress, alors n'hésitez pas à augmenter le nombre d'instances WordPress en utilisant  $ kubectl scale --replicas=<number of replicas> deployment/wordpress.
 
-When all your pods are running, run the following commands to check your pod names.
+Pour obtenir l'adresse de l'équilibreur de charge du service WordPress, tapez  $ kubectl get services wordpress et saisissez le  EXTERNAL-IP champ du résultat pour naviguer vers WordPress.
 
-```bash
-kubectl get pods
-```
+## Tests de résilience
 
-This should return a list of pods from the kubernetes cluster.
+OK, maintenant que nous avons déployé nos services, commençons à les démolir pour voir à quel point notre architecture HA gère un certain chaos. Dans cette approche, le seul point de défaillance restant est le service NFS (pour les raisons expliquées dans la Conclusion). Vous devriez pouvoir démontrer en testant l'échec de tout autre service pour voir comment l'application répond. J'ai commencé avec trois répliques du service WordPress et un maître et deux esclaves sur le service MySQL.
 
-```bash
-NAME                               READY     STATUS    RESTARTS   AGE
-wordpress-3772071710-58mmd         1/1       Running   0          17s
-```
+Tout d'abord, tuons tous les nœuds WordPress sauf un et voyons comment l'application réagit:
 
-# 4. Accessing the external WordPress link
+$ kubectl scale --replicas=1 deployment/wordpress
 
-> If you have a paid cluster, you can use LoadBalancer instead of NodePort by running
->
->`kubectl edit services wordpress`
->
-> Under `spec`, change `type: NodePort` to `type: LoadBalancer`
->
-> **Note:** Make sure you have `service "wordpress" edited` shown after editing the yaml file because that means the yaml file is successfully edited without any typo or connection errors.
+Maintenant, nous devrions voir une baisse du nombre de pods pour le déploiement de WordPress.
 
-You can obtain your cluster's IP address using
+$ kubectl get pods
 
-```bash
-$ bx cs workers <your_cluster_name>
-OK
-ID                                                 Public IP        Private IP     Machine Type   State    Status   
-kube-hou02-pa817264f1244245d38c4de72fffd527ca-w1   169.47.220.142   10.10.10.57    free           normal   Ready 
-```
+Nous devrions voir que les pods WordPress fonctionnent seulement  1/1 maintenant.
 
-You will also need to run the following command to get your NodePort number.
+Lorsque vous atteignez l'adresse IP du service WordPress, nous verrons le même site et la même base de données qu'auparavant.
 
-```bash
-$ kubectl get svc wordpress
-NAME        CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
-wordpress   10.10.10.57   <nodes>       80:30180/TCP   2m
-```
+Pour agrandir, nous pouvons utiliser  $ kubectl scale --replicas=3 deployment/wordpress.
 
-Congratulation. Now you can use the link **http://[IP]:[port number]** to access your WordPress site.
+Nous verrons à nouveau que les données sont conservées dans les trois instances.
 
+Pour tester le StatefulSet de MySQL, nous pouvons réduire le nombre de réplicas en utilisant ce qui suit:
 
-> **Note:** For the above example, the link would be http://169.47.220.142:30180
+$ kubectl scale statefulsets mysql --replicas=1
 
-You can check the status of your deployment on Kubernetes UI. Run `kubectl proxy` and go to URL 'http://127.0.0.1:8001/ui' to check when the WordPress container becomes ready.
+Nous verrons une perte des deux esclaves dans cette instance et, en cas de perte du maître à ce moment, les données qu'il contient seront conservées sur le disque persistant GCE. Cependant, nous devrons récupérer manuellement les données du disque.
 
-![Kubernetes Status Page](images/kube_ui.png)
+Si les trois nœuds MySQL ne fonctionnent plus, vous ne pourrez pas répliquer lorsque de nouveaux nœuds apparaîtront. Cependant, si un nœud maître tombe en panne, un nouveau maître sera lancé et via  xtrabackup, il se repeuplera avec les données d'un esclave. Par conséquent, je ne recommande jamais d'exécuter avec un facteur de réplication de moins de trois lors de l'exécution de bases de données de production.
 
-> **Note:** It can take up to 5 minutes for the pods to be fully functioning.
+Pour conclure, parlons de quelques meilleures solutions pour vos données d'état, car Kubernetes n'est pas vraiment conçu pour l'état.
 
-
-
-**(Optional)** If you have more resources in your cluster, and you want to scale up your WordPress website, you can run the following commands to check your current deployments.
-```bash
-$ kubectl get deployments
-NAME              DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
-wordpress         1         1         1            1           23h
-wordpress-mysql   1         1         1            1           23h
-```
-
-Now, you can run the following commands to scale up for WordPress frontend.
-```bash
-$ kubectl scale deployments/wordpress --replicas=2
-deployment "wordpress" scaled
-$ kubectl get deployments
-NAME              DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
-wordpress         2         2         2            2           23h
-wordpress-mysql   1         1         1            1           23h
-```
-As you can see, we now have 2 pods that are running the WordPress frontend.
-
-> **Note:** If you are a free tier user, we recommend you only scale up to 10 pods since free tier users have limited resources.
-
-# 5. Using WordPress
-
-Now that WordPress is running you can register as a new user and install WordPress.
-
-![wordpress home Page](images/wordpress.png)
-
-After installing WordPress, you can post new comments.
-
-![wordpress comment Page](images/wordpress_comment.png)
-
-
-# Troubleshooting
-
-If you accidentally created a password with newlines and you can not authorize your MySQL service, you can delete your current secret using
-
-```bash
-kubectl delete secret mysql-pass
-```
-
-If you want to delete your services, deployments, and persistent volume claim, you can run
-```bash
-kubectl delete deployment,service,pvc -l app=wordpress
-```
-
-If you want to delete your persistent volume, you can run the following commands
-```bash
-kubectl delete -f local-volumes.yaml
-```
-
-If WordPress is taking a long time, you can debug it by inspecting the logs
-```bash
-kubectl get pods # Get the name of the wordpress pod
-kubectl logs [wordpress pod name]
-```
-
-
-# References
-- This WordPress example is based on Kubernetes's open source example [mysql-wordpress-pd](https://github.com/kubernetes/kubernetes/tree/master/examples/mysql-wordpress-pd) at https://github.com/kubernetes/kubernetes/tree/master/examples/mysql-wordpress-pd.
-
-# Privacy Notice
-
-Sample Kubernetes Yaml file that includes this package may be configured to track deployments to [IBM Cloud](https://www.bluemix.net/) and other Kubernetes platforms. The following information is sent to a [Deployment Tracker](https://github.com/IBM/metrics-collector-service) service on each deployment:
-
-* Kubernetes Cluster Provider(`IBM Cloud, Minikube, etc`)
-* Kubernetes Machine ID
-* Kubernetes Cluster ID (Only from IBM Cloud's cluster)
-* Kubernetes Customer ID (Only from IBM Cloud's cluster)
-* Environment variables in this Kubernetes Job.
-
-This data is collected from the Kubernetes Job in the sample application's yaml file. This data is used by IBM to track metrics around deployments of sample applications to IBM Cloud to measure the usefulness of our examples so that we can continuously improve the content we offer to you. Only deployments of sample applications that include code to ping the Deployment Tracker service will be tracked.
-
-## Disabling Deployment Tracking
-
-Please comment out/remove the Metric Kubernetes Job portion at the end of the 'wordpress-deployment.yaml' file.
 
 
 # License
-[Apache 2.0](LICENSE)
+[MIT](LICENSE)
