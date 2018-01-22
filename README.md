@@ -29,6 +29,103 @@ Diagramme
 
 ![kube-wordpress](https://comtechies.com/wp-content/uploads/2016/04/kubernetes-cluster.png)
 
+# Instalation Kubernetes via Minikube
+
+<img src="https://github.com/kubernetes/minikube/raw/master/logo/logo.png" width="100">
+
+Minikube est un outil qui facilite l'exécution locale de Kubernetes. Minikube exécute un cluster Kubernetes à un nœud à l'intérieur d'une machine virtuelle sur votre ordinateur portable pour les utilisateurs qui cherchent à essayer Kubernetes ou à développer avec lui au jour le jour.
+
+## Installation
+
+```shell
+curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && chmod +x minikube && sudo mv minikube /usr/local/bin/
+```
+
+
+## Quickstart
+
+Voici une brève démonstration de l'utilisation de Minikube. Si vous souhaitez modifier le pilote VM, ajoutez l' --vm-driver=xxxindicateur approprié minikube start. Minikube prend en charge les drivers suivants:
+
+* virtualbox
+* vmwarefusion
+* [KVM2](https://github.com/kubernetes/minikube/blob/master/docs/drivers.md#kvm2-driver)
+* [KVM (deprecated in favor of KVM2)](https://github.com/kubernetes/minikube/blob/master/docs/drivers.md#kvm-driver)
+* [hyperkit](https://github.com/kubernetes/minikube/blob/master/docs/drivers.md#hyperkit-driver)
+* [xhyve](https://github.com/kubernetes/minikube/blob/master/docs/drivers.md#xhyve-driver)
+* [hyperv](https://github.com/kubernetes/minikube/blob/master/docs/drivers.md#hyperV-driver)
+* none - ce pilote peut être utilisé pour exécuter les composants du cluster Kubernetes sur l'hôte plutôt que sur une machine virtuelle. Cela peut être utile pour les charges de travail CI qui ne prennent pas en charge la virtualisation imbriquée.
+
+```shell
+$ minikube start
+Starting local Kubernetes v1.7.5 cluster...
+Starting VM...
+SSH-ing files into VM...
+Setting up certs...
+Starting cluster components...
+Connecting to cluster...
+Setting up kubeconfig...
+Kubectl is now configured to use the cluster.
+
+$ kubectl run hello-minikube --image=k8s.gcr.io/echoserver:1.4 --port=8080
+deployment "hello-minikube" created
+$ kubectl expose deployment hello-minikube --type=NodePort
+service "hello-minikube" exposed
+
+# We have now launched an echoserver pod but we have to wait until the pod is up before curling/accessing it
+# via the exposed service.
+# To check whether the pod is up and running we can use the following:
+$ kubectl get pod
+NAME                              READY     STATUS              RESTARTS   AGE
+hello-minikube-3383150820-vctvh   1/1       ContainerCreating   0          3s
+# We can see that the pod is still being created from the ContainerCreating status
+$ kubectl get pod
+NAME                              READY     STATUS    RESTARTS   AGE
+hello-minikube-3383150820-vctvh   1/1       Running   0          13s
+# We can see that the pod is now Running and we will now be able to curl it:
+$ curl $(minikube service hello-minikube --url)
+CLIENT VALUES:
+client_address=192.168.99.1
+command=GET
+real path=/
+...
+$ kubectl delete service hello-minikube
+service "hello-minikube" deleted
+$ kubectl delete deployment hello-minikube
+deployment "hello-minikube" deleted
+$ minikube stop
+Stopping local Kubernetes cluster...
+Machine stopped.
+```
+
+## Interagir avec cluster
+
+### kubectl
+
+La minikube startcommande crée un " contexte kubectl " appelé "minikube". Ce contexte contient la configuration pour communiquer avec votre cluster Minikube.
+
+Minikube définit automatiquement ce contexte par défaut, mais si vous devez y revenir par la suite, exécutez:
+
+`kubectl config use-context minikube`,
+
+ou de transmettre le contexte de chaque commande comme ceci `kubectl get pods --context=minikube`.
+
+### Dashboard
+
+Pour accéder au tableau de [Kubernetes Dashboard](http://kubernetes.io/docs/user-guide/ui/) , exécutez cette commande dans un shell après avoir démarré Minikube pour obtenir l'adresse:
+
+```shell
+minikube dashboard
+```
+
+### Services
+
+Pour accéder à un service exposé via un port de noeud, exécutez cette commande dans un shell après avoir démarré Minikube pour obtenir l'adresse:
+
+```shell
+minikube service [-n NAMESPACE] [--url] NAME
+
+```
+
 ## Création de classes de stockage, de services et de cartes de configuration dans Kubernetes
 
 
@@ -938,9 +1035,7 @@ curl -i -X POST 'KUBERNETES_HOST:30000/token/USERNAME' \
 ```     
      
 ## Wrap up
-Avec la configuration de nos services, nous avons à la fois un service et un déploiement MySQL persistant, ainsi qu'un déploiement Web sans état pour le service go-auth. Nous pouvons terminer le conteneur MySQL et il redémarrera sans perdre l'état (bien qu'il y aura un temps d'arrêt temporaire). Vous pouvez également monter le même volume NFS qu'un volume en lecture seule pour les esclaves MySQL afin de permettre les lectures même si le maître est en panne et en cours de remplacement. Dans les prochains articles, nous couvrirons l'utilisation de Pet Sets et de bases de données répliquées de la couche d'application de style Cassandra pour avoir des couches persistantes qui tolèrent l'échec sans interruption. Pour la couche Web sans état, nous prenons déjà en charge la reprise sur incident sans temps d'arrêt. En plus de nos services et de nos déploiements, nous avons examiné comment gérer les secrets de notre cluster de sorte qu'ils ne puissent être exposés à l'application qu'au moment de l'exécution. Enfin,
-
-Kubernetes peut être décourageant avec sa pléthore de terminologie et de verbosité. Cependant, si vous avez besoin d'exécuter des charges de travail en production sous charge, Kubernetes fournit une grande partie de la plomberie que vous auriez à faire manuellement.
+Avec la configuration de nos services, nous avons à la fois un service et un déploiement MySQL persistant, ainsi qu'un déploiement Web sans état pour le service go-auth. Nous pouvons terminer le conteneur MySQL et il redémarrera sans perdre l'état (bien qu'il y aura un temps d'arrêt temporaire). Vous pouvez également monter le même volume NFS qu'un volume en lecture seule pour les esclaves MySQL afin de permettre les lectures même si le maître est en panne et en cours de remplacement. Dans les prochains articles, nous couvrirons l'utilisation de Pet Sets et de bases de données répliquées de la couche d'application de style Cassandra pour avoir des couches persistantes qui tolèrent l'échec sans interruption. Pour la couche Web sans état, nous prenons déjà en charge la reprise sur incident sans temps d'arrêt. En plus de nos services et de nos déploiements, nous avons examiné comment gérer les secrets de notre cluster de sorte qu'ils ne puissent être exposés à l'application qu'au moment de l'exécution.
 
 
 # License
