@@ -1,4 +1,6 @@
-# Exécution de WordPress hautement disponible avec MySQL sur Kubernetes
+:ok_hand: [Slide Docker Ecosystem](http://31.220.43.44/c/index.htm) :+1:
+
+# Site web WordPress hautement disponible sur Kubernetes
 
 [![Build Status](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes.svg?branch=master)](https://travis-ci.org/IBM/Scalable-WordPress-deployment-on-Kubernetes)
 
